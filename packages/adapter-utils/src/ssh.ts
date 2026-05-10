@@ -58,13 +58,11 @@ export function createSshCommandManagedRuntimeRunner(input: {
         ? envEntries.map(([key, value]) => `export ${key}=${shellQuote(value)};`).join(" ") + " "
         : "";
       const commandScript = command === "sh" || command === "bash"
-        ? args[0] === "-lc" && typeof args[1] === "string"
+        ? (args[0] === "-c" || args[0] === "-lc") && typeof args[1] === "string"
           ? `${exportPrefix}${args[1]}`
           : `${envPrefix}exec ${[shellQuote(command), ...args.map((arg) => shellQuote(arg))].join(" ")}`
         : `${envPrefix}exec ${[shellQuote(command), ...args.map((arg) => shellQuote(arg))].join(" ")}`;
-      const remoteCommand = `${command === "bash" ? "bash" : "sh"} -lc ${
-        shellQuote(`cd ${shellQuote(cwd)} && ${commandScript}`)
-      }`;
+      const remoteCommand = `cd ${shellQuote(cwd)} && ${commandScript}`;
 
       try {
         const result = await runSshCommand(input.spec, remoteCommand, {
@@ -339,7 +337,7 @@ async function commandExists(command: string): Promise<boolean> {
 
 async function resolveCommandPath(command: string): Promise<string | null> {
   try {
-    const result = await execFileText("sh", ["-lc", `command -v ${shellQuote(command)}`], {
+    const result = await execFileText("sh", ["-c", `command -v ${shellQuote(command)}`], {
       timeout: 5_000,
       maxBuffer: 8 * 1024,
     });
@@ -438,7 +436,7 @@ async function runSshScript(
 ): Promise<SshCommandResult> {
   return await runSshCommand(
     config,
-    `sh -lc ${shellQuote(script)}`,
+    script,
     options,
   );
 }
@@ -519,7 +517,7 @@ async function streamLocalFileToSsh(input: {
     "-p",
     String(input.spec.port),
     `${input.spec.username}@${input.spec.host}`,
-    `sh -lc ${shellQuote(input.remoteScript)}`,
+    `sh -c ${shellQuote(input.remoteScript)}`,
   ];
 
   await new Promise<void>((resolve, reject) => {
@@ -568,7 +566,7 @@ async function streamSshToLocalFile(input: {
     "-p",
     String(input.spec.port),
     `${input.spec.username}@${input.spec.host}`,
-    `sh -lc ${shellQuote(input.remoteScript)}`,
+    `sh -c ${shellQuote(input.remoteScript)}`,
   ];
 
   await new Promise<void>((resolve, reject) => {
@@ -906,6 +904,13 @@ async function isSshEnvLabFixtureProcess(state: Pick<SshEnvLabFixtureState, "pid
 }
 
 export async function getSshEnvLabSupport(): Promise<SshEnvLabSupport> {
+  if (process.platform === "darwin" && process.env.PAPERCLIP_ENABLE_DARWIN_SSH_ENV_LAB !== "1") {
+    return {
+      supported: false,
+      reason: "SSH env-lab fixture is disabled on macOS; set PAPERCLIP_ENABLE_DARWIN_SSH_ENV_LAB=1 to opt in.",
+    };
+  }
+
   for (const command of ["ssh", "sshd", "ssh-keygen"]) {
     if (!(await commandExists(command))) {
       return {
@@ -970,7 +975,7 @@ export async function runSshCommand(
       "-p",
       String(config.port),
       `${config.username}@${config.host}`,
-      `sh -lc ${shellQuote(remoteScript)}`,
+      `sh -c ${shellQuote(remoteScript)}`,
     );
 
     return options.stdin != null
@@ -1025,7 +1030,7 @@ export async function buildSshSpawnTarget(input: {
     "-p",
     String(input.spec.port),
     `${input.spec.username}@${input.spec.host}`,
-    `sh -lc ${shellQuote(remoteScript)}`,
+    `sh -c ${shellQuote(remoteScript)}`,
   );
 
   return {
@@ -1048,7 +1053,7 @@ export async function syncDirectoryToSsh(input: {
     "-p",
     String(input.spec.port),
     `${input.spec.username}@${input.spec.host}`,
-    `sh -lc ${shellQuote(`mkdir -p ${shellQuote(input.remoteDir)} && tar -xf - -C ${shellQuote(input.remoteDir)}`)}`,
+    `sh -c ${shellQuote(`mkdir -p ${shellQuote(input.remoteDir)} && tar -xf - -C ${shellQuote(input.remoteDir)}`)}`,
   ];
 
   await new Promise<void>((resolve, reject) => {
@@ -1144,7 +1149,7 @@ export async function syncDirectoryFromSsh(input: {
     "-p",
     String(input.spec.port),
     `${input.spec.username}@${input.spec.host}`,
-    `sh -lc ${shellQuote(remoteTarScript)}`,
+    `sh -c ${shellQuote(remoteTarScript)}`,
   ];
 
   try {
@@ -1346,7 +1351,7 @@ export async function ensureSshWorkspaceReady(
 ): Promise<{ remoteCwd: string }> {
   const result = await runSshCommand(
     config,
-    `sh -lc ${shellQuote(`mkdir -p ${shellQuote(config.remoteWorkspacePath)} && cd ${shellQuote(config.remoteWorkspacePath)} && pwd`)}`,
+    `mkdir -p ${shellQuote(config.remoteWorkspacePath)} && cd ${shellQuote(config.remoteWorkspacePath)} && pwd`,
   );
   return {
     remoteCwd: result.stdout.trim(),
