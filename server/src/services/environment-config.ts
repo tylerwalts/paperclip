@@ -518,6 +518,7 @@ export async function normalizeEnvironmentConfigForPersistence(input: {
         environmentName: input.environmentName,
         driver: input.driver,
         field: "private-key",
+        provider: input.secretProvider,
         value: privateKey,
         actor: input.actor,
       });
