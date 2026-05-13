@@ -35,6 +35,7 @@ COPY packages/plugins/sdk/package.json packages/plugins/sdk/
 COPY --parents packages/plugins/sandbox-providers/./*/package.json packages/plugins/sandbox-providers/
 COPY --parents packages/plugins/examples/./*/package.json packages/plugins/examples/
 COPY packages/plugins/paperclip-plugin-fake-sandbox/package.json packages/plugins/paperclip-plugin-fake-sandbox/
+COPY packages/plugins/plugin-llm-wiki/package.json packages/plugins/plugin-llm-wiki/
 COPY patches/ patches/
 
 RUN pnpm install --frozen-lockfile
