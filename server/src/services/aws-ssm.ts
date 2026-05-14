@@ -52,10 +52,7 @@ export async function resolveSsmInstanceByTag(
   try {
     response = await client.send(
       new DescribeInstanceInformationCommand({
-        Filters: [
-          { Key: `tag:${tagKey}`, Values: [tagValue] },
-          { Key: "PingStatus", Values: ["Online"] },
-        ],
+        Filters: [{ Key: `tag:${tagKey}`, Values: [tagValue] }],
         MaxResults: 50,
       }),
     );
@@ -68,7 +65,9 @@ export async function resolveSsmInstanceByTag(
 
   const matches = (response.InstanceInformationList ?? []).filter(
     (entry): entry is InstanceInformation & { InstanceId: string } =>
-      typeof entry.InstanceId === "string" && entry.InstanceId.length > 0,
+      typeof entry.InstanceId === "string" &&
+      entry.InstanceId.length > 0 &&
+      entry.PingStatus === "Online",
   );
 
   if (matches.length === 0) {
