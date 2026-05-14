@@ -110,44 +110,11 @@ export async function resolveEnvironmentExecutionTarget(input: {
     };
   }
 
-  if (!REMOTE_CAPABLE_ADAPTER_TYPES.has(input.adapterType)) {
-    return null;
-  }
-
-  const parsed = await resolveEnvironmentDriverConfigForRuntime(input.db, input.companyId, {
-    id: input.environment.id,
-    driver: input.environment.driver as "ssh",
-    config: parseObject(input.environment.config),
-  });
-  if (parsed.driver !== "ssh") {
-    return null;
-  }
-
-    const remoteCwd =
-      typeof input.leaseMetadata?.remoteCwd === "string" && input.leaseMetadata.remoteCwd.trim().length > 0
-        ? input.leaseMetadata.remoteCwd.trim()
-        : parsed.config.remoteWorkspacePath;
-
-    return {
-      kind: "remote",
-      transport: "ssh",
-      environmentId: input.environment.id ?? null,
-      leaseId: input.leaseId ?? null,
-      remoteCwd,
-      spec: {
-        host: parsed.config.host,
-        port: parsed.config.port,
-        username: parsed.config.username,
-        remoteWorkspacePath: parsed.config.remoteWorkspacePath,
-        privateKey: parsed.config.privateKey,
-        knownHosts: parsed.config.knownHosts,
-        strictHostKeyChecking: parsed.config.strictHostKeyChecking,
-        remoteCwd,
-      },
-    };
-  }
-
   if (input.environment.driver === "ssm") {
+    if (!REMOTE_CAPABLE_ADAPTER_TYPES.has(input.adapterType)) {
+      return null;
+    }
+
     const parsed = await resolveEnvironmentDriverConfigForRuntime(input.db, input.companyId, {
       driver: "ssm",
       config: parseObject(input.environment.config),
@@ -203,7 +170,41 @@ export async function resolveEnvironmentExecutionTarget(input: {
     };
   }
 
-  return null;
+  if (!REMOTE_CAPABLE_ADAPTER_TYPES.has(input.adapterType)) {
+    return null;
+  }
+
+  const parsed = await resolveEnvironmentDriverConfigForRuntime(input.db, input.companyId, {
+    id: input.environment.id,
+    driver: input.environment.driver as "ssh",
+    config: parseObject(input.environment.config),
+  });
+  if (parsed.driver !== "ssh") {
+    return null;
+  }
+
+  const remoteCwd =
+    typeof input.leaseMetadata?.remoteCwd === "string" && input.leaseMetadata.remoteCwd.trim().length > 0
+      ? input.leaseMetadata.remoteCwd.trim()
+      : parsed.config.remoteWorkspacePath;
+
+  return {
+    kind: "remote",
+    transport: "ssh",
+    environmentId: input.environment.id ?? null,
+    leaseId: input.leaseId ?? null,
+    remoteCwd,
+    spec: {
+      host: parsed.config.host,
+      port: parsed.config.port,
+      username: parsed.config.username,
+      remoteWorkspacePath: parsed.config.remoteWorkspacePath,
+      privateKey: parsed.config.privateKey,
+      knownHosts: parsed.config.knownHosts,
+      strictHostKeyChecking: parsed.config.strictHostKeyChecking,
+      remoteCwd,
+    },
+  };
 }
 
 export async function resolveEnvironmentExecutionTransport(
