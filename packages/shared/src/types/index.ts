@@ -280,6 +280,7 @@ export type {
 } from "./secrets.js";
 export type {
   Routine,
+  RoutineEnvConfig,
   RoutineManagedByPlugin,
   RoutineVariable,
   RoutineVariableDefaultValue,
