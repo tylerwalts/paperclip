@@ -18,6 +18,11 @@ import type {
 import { ensureSshWorkspaceReady } from "@paperclipai/adapter-utils/ssh";
 import { environmentService } from "./environments.js";
 import {
+  assertSsmCliAvailable,
+  resolveSsmInstanceByTag,
+  runSsmCommand,
+} from "./aws-ssm.js";
+import {
   parseEnvironmentDriverConfig,
   resolveEnvironmentDriverConfigForRuntime,
   stripSandboxProviderEnvelope,
@@ -295,6 +300,121 @@ function createSshEnvironmentDriver(db: Db): EnvironmentRuntimeDriver {
         metadata: {
           workspaceRealization: record,
         },
+      };
+    },
+  };
+}
+
+function createSsmEnvironmentDriver(db: Db): EnvironmentRuntimeDriver {
+  const environmentsSvc = environmentService(db);
+
+  return {
+    driver: "ssm",
+
+    async acquireRunLease(input) {
+      const parsed = await resolveEnvironmentDriverConfigForRuntime(db, input.companyId, input.environment);
+      if (parsed.driver !== "ssm") {
+        throw new Error(`Expected SSM environment config for driver "${input.environment.driver}".`);
+      }
+
+      await assertSsmCliAvailable();
+
+      const resolved = await resolveSsmInstanceByTag({
+        region: parsed.config.region,
+        awsProfile: parsed.config.awsProfile,
+        tagKey: parsed.config.tagKey,
+        tagValue: parsed.config.tagValue,
+      });
+
+      const remoteWorkspacePath = parsed.config.remoteWorkspacePath;
+      const result = await runSsmCommand({
+        region: parsed.config.region,
+        awsProfile: parsed.config.awsProfile,
+        instanceId: resolved.instanceId,
+        command: `mkdir -p ${remoteWorkspacePath} && cd ${remoteWorkspacePath} && pwd`,
+        timeoutMs: 15_000,
+      });
+
+      const remoteCwd = (!result.timedOut && result.exitCode === 0 && result.stdout.trim().length > 0)
+        ? result.stdout.trim()
+        : remoteWorkspacePath;
+
+      return await environmentsSvc.acquireLease({
+        companyId: input.companyId,
+        environmentId: input.environment.id,
+        executionWorkspaceId: input.executionWorkspaceId,
+        issueId: input.issueId,
+        heartbeatRunId: input.heartbeatRunId,
+        leasePolicy: "ephemeral",
+        provider: "ssm",
+        providerLeaseId: `ssm://${parsed.config.region}/${resolved.instanceId}${remoteCwd}`,
+        metadata: {
+          driver: input.environment.driver,
+          executionWorkspaceMode: input.executionWorkspaceMode,
+          region: parsed.config.region,
+          instanceId: resolved.instanceId,
+          tagKey: parsed.config.tagKey,
+          tagValue: parsed.config.tagValue,
+          remoteWorkspacePath,
+          remoteCwd,
+        },
+      });
+    },
+
+    async releaseRunLease(input) {
+      return await environmentsSvc.releaseLease(input.lease.id, input.status);
+    },
+
+    async realizeWorkspace(input) {
+      const record = buildWorkspaceRealizationRecordFromDriverInput({
+        environment: input.environment,
+        lease: input.lease,
+        workspace: input.workspace,
+        cwd:
+          typeof input.lease.metadata?.remoteCwd === "string" && input.lease.metadata.remoteCwd.trim().length > 0
+            ? input.lease.metadata.remoteCwd.trim()
+            : input.workspace.remotePath ?? input.workspace.localPath ?? null,
+      });
+      return {
+        cwd: record.remote.path ?? record.local.path,
+        metadata: {
+          workspaceRealization: record,
+        },
+      };
+    },
+
+    async execute(input) {
+      const region =
+        typeof input.lease.metadata?.region === "string" ? input.lease.metadata.region : null;
+      const instanceId =
+        typeof input.lease.metadata?.instanceId === "string" ? input.lease.metadata.instanceId : null;
+      const awsProfile =
+        typeof input.lease.metadata?.awsProfile === "string" ? input.lease.metadata.awsProfile : null;
+
+      if (!region || !instanceId) {
+        throw new Error("SSM lease metadata missing region or instanceId for command execution.");
+      }
+
+      const cwd = input.cwd ?? (typeof input.lease.metadata?.remoteCwd === "string" ? input.lease.metadata.remoteCwd : "/tmp");
+      const envPrefix = input.env
+        ? Object.entries(input.env).map(([k, v]) => `export ${k}=${shellQuoteForSsm(v)};`).join(" ")
+        : "";
+      const fullCommand = `cd ${shellQuoteForSsm(cwd)} && ${envPrefix}${input.command}${input.args?.length ? " " + input.args.join(" ") : ""}`;
+
+      const result = await runSsmCommand({
+        region,
+        awsProfile,
+        instanceId,
+        command: fullCommand,
+        timeoutMs: input.timeoutMs ?? 60_000,
+      });
+
+      return {
+        stdout: result.stdout,
+        stderr: result.stderr,
+        exitCode: result.exitCode ?? (result.timedOut ? null : 1),
+        signal: null,
+        timedOut: result.timedOut,
       };
     },
   };
@@ -748,6 +868,10 @@ function createSandboxEnvironmentDriver(
   }
 }
 
+function shellQuoteForSsm(value: string): string {
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
 function parseExpiresAt(value: string | null | undefined): Date | null {
   if (!value) return null;
   const parsed = new Date(value);
@@ -1065,6 +1189,7 @@ export function environmentRuntimeService(
   const defaultDrivers = [
     createLocalEnvironmentDriver(db),
     createSshEnvironmentDriver(db),
+    createSsmEnvironmentDriver(db),
     createSandboxEnvironmentDriver(db, {
       pluginWorkerManager: options.pluginWorkerManager,
       pluginWorkerReadyTimeoutMs: options.pluginWorkerReadyTimeoutMs,

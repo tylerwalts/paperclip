@@ -9,6 +9,11 @@ import os from "node:os";
 import { isBuiltinSandboxProvider, probeSandboxProvider } from "./sandbox-provider-runtime.js";
 import { probePluginEnvironmentDriver, probePluginSandboxProviderDriver } from "./plugin-environment-driver.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
+import {
+  assertSsmCliAvailable,
+  resolveSsmInstanceByTag,
+  runSsmCommand,
+} from "./aws-ssm.js";
 
 export async function probeEnvironment(
   db: Db,
@@ -72,6 +77,102 @@ export async function probeEnvironment(
       environmentId: environment.id,
       config: parsed.config,
     });
+  }
+
+  if (parsed.driver === "ssm") {
+    try {
+      await assertSsmCliAvailable();
+
+      const resolved = await resolveSsmInstanceByTag({
+        region: parsed.config.region,
+        awsProfile: parsed.config.awsProfile,
+        tagKey: parsed.config.tagKey,
+        tagValue: parsed.config.tagValue,
+      });
+
+      const remoteWorkspacePath = parsed.config.remoteWorkspacePath;
+      const result = await runSsmCommand({
+        region: parsed.config.region,
+        awsProfile: parsed.config.awsProfile,
+        instanceId: resolved.instanceId,
+        command: `mkdir -p ${remoteWorkspacePath} && cd ${remoteWorkspacePath} && pwd`,
+        timeoutMs: 15_000,
+      });
+
+      if (result.timedOut) {
+        return {
+          ok: false,
+          driver: "ssm",
+          summary: `SSM session timed out verifying workspace on ${resolved.instanceId}.`,
+          details: {
+            region: parsed.config.region,
+            instanceId: resolved.instanceId,
+            tagKey: parsed.config.tagKey,
+            tagValue: parsed.config.tagValue,
+            remoteWorkspacePath,
+          },
+        };
+      }
+
+      if (result.exitCode !== 0) {
+        return {
+          ok: false,
+          driver: "ssm",
+          summary: `SSM probe failed: could not verify workspace path on ${resolved.instanceId}.`,
+          details: {
+            region: parsed.config.region,
+            instanceId: resolved.instanceId,
+            tagKey: parsed.config.tagKey,
+            tagValue: parsed.config.tagValue,
+            remoteWorkspacePath,
+            error: result.stderr.trim() || result.stdout.trim(),
+          },
+        };
+      }
+
+      const remoteCwd = result.stdout.trim() || remoteWorkspacePath;
+
+      return {
+        ok: true,
+        driver: "ssm",
+        summary: `Connected via SSM to ${resolved.instanceId} (tag ${parsed.config.tagKey}=${parsed.config.tagValue}) and verified the remote workspace path.`,
+        details: {
+          region: parsed.config.region,
+          instanceId: resolved.instanceId,
+          tagKey: parsed.config.tagKey,
+          tagValue: parsed.config.tagValue,
+          remoteWorkspacePath,
+          remoteCwd,
+          platformType: resolved.platformType,
+        },
+      };
+    } catch (error) {
+      const stderr =
+        error && typeof error === "object" && "stderr" in error && typeof error.stderr === "string"
+          ? error.stderr.trim()
+          : "";
+      const stdout =
+        error && typeof error === "object" && "stdout" in error && typeof error.stdout === "string"
+          ? error.stdout.trim()
+          : "";
+      const message =
+        stderr ||
+        stdout ||
+        (error instanceof Error ? error.message : String(error)) ||
+        "SSM probe failed.";
+      return {
+        ok: false,
+        driver: "ssm",
+        summary: `SSM probe failed for tag ${parsed.config.tagKey}=${parsed.config.tagValue} in ${parsed.config.region}.`,
+        details: {
+          region: parsed.config.region,
+          tagKey: parsed.config.tagKey,
+          tagValue: parsed.config.tagValue,
+          remoteWorkspacePath: parsed.config.remoteWorkspacePath,
+          error: message,
+        },
+      };
+    }
   }
 
   try {

@@ -248,4 +248,103 @@ describe("environment config helpers", () => {
       },
     });
   });
+
+  it("normalizes SSM config into its canonical stored shape", () => {
+    const config = normalizeEnvironmentConfig({
+      driver: "ssm",
+      config: {
+        region: "us-east-1",
+        awsProfile: "  ",
+        tagKey: "Paperclip",
+        tagValue: "runner-prod",
+        remoteWorkspacePath: "/home/ec2-user/workspace",
+      },
+    });
+
+    expect(config).toEqual({
+      region: "us-east-1",
+      awsProfile: null,
+      tagKey: "Paperclip",
+      tagValue: "runner-prod",
+      remoteWorkspacePath: "/home/ec2-user/workspace",
+    });
+  });
+
+  it("rejects SSM config without region", () => {
+    expect(() =>
+      normalizeEnvironmentConfig({
+        driver: "ssm",
+        config: {
+          tagKey: "Paperclip",
+          tagValue: "runner-prod",
+          remoteWorkspacePath: "/home/ec2-user/workspace",
+        },
+      }),
+    ).toThrow(HttpError);
+  });
+
+  it("rejects SSM config with non-absolute remote workspace path", () => {
+    expect(() =>
+      normalizeEnvironmentConfig({
+        driver: "ssm",
+        config: {
+          region: "us-east-1",
+          tagKey: "Paperclip",
+          tagValue: "runner-prod",
+          remoteWorkspacePath: "relative/path",
+        },
+      }),
+    ).toThrow(HttpError);
+  });
+
+  it("rejects SSM config with malformed region", () => {
+    expect(() =>
+      normalizeEnvironmentConfig({
+        driver: "ssm",
+        config: {
+          region: "MyRegion",
+          tagKey: "Paperclip",
+          tagValue: "runner-prod",
+          remoteWorkspacePath: "/home/ec2-user/workspace",
+        },
+      }),
+    ).toThrow(HttpError);
+  });
+
+  it("rejects SSM config with unrecognized keys", () => {
+    expect(() =>
+      normalizeEnvironmentConfig({
+        driver: "ssm",
+        config: {
+          region: "us-east-1",
+          tagKey: "Paperclip",
+          tagValue: "runner-prod",
+          remoteWorkspacePath: "/home/ec2-user/workspace",
+          username: "ec2-user",
+        },
+      }),
+    ).toThrow(HttpError);
+  });
+
+  it("parses SSM driver config back into the typed union", () => {
+    const parsed = parseEnvironmentDriverConfig({
+      driver: "ssm",
+      config: {
+        region: "us-west-2",
+        awsProfile: "prod",
+        tagKey: "Paperclip",
+        tagValue: "runner-prod",
+        remoteWorkspacePath: "/home/ec2-user/workspace",
+      },
+    });
+
+    expect(parsed.driver).toBe("ssm");
+    if (parsed.driver === "ssm") {
+      expect(parsed.config.region).toBe("us-west-2");
+      expect(parsed.config.awsProfile).toBe("prod");
+      expect(parsed.config.tagKey).toBe("Paperclip");
+      expect(parsed.config.tagValue).toBe("runner-prod");
+      expect(parsed.config.remoteWorkspacePath).toBe("/home/ec2-user/workspace");
+    }
+  });
 });

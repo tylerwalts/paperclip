@@ -7,8 +7,22 @@ import {
 import { parseObject } from "../adapters/utils.js";
 import { resolveEnvironmentDriverConfigForRuntime } from "./environment-config.js";
 import type { EnvironmentRuntimeService } from "./environment-runtime.js";
+import { resolveSsmInstanceByTag, runSsmCommand } from "./aws-ssm.js";
 
 export const DEFAULT_SANDBOX_REMOTE_CWD = "/tmp";
+
+// Adapter types that know how to dispatch through AdapterExecutionTarget for
+// remote drivers (ssh, ssm, sandbox). Kept as a single source of truth so the
+// list does not drift between branches.
+const REMOTE_CAPABLE_ADAPTER_TYPES = new Set([
+  "acpx_local",
+  "codex_local",
+  "claude_local",
+  "gemini_local",
+  "opencode_local",
+  "pi_local",
+  "cursor",
+]);
 
 export async function resolveEnvironmentExecutionTarget(input: {
   db: Db;
@@ -33,15 +47,7 @@ export async function resolveEnvironmentExecutionTarget(input: {
   }
 
   if (input.environment.driver === "sandbox") {
-    if (
-      input.adapterType !== "acpx_local" &&
-      input.adapterType !== "codex_local" &&
-      input.adapterType !== "claude_local" &&
-      input.adapterType !== "gemini_local" &&
-      input.adapterType !== "opencode_local" &&
-      input.adapterType !== "pi_local" &&
-      input.adapterType !== "cursor"
-    ) {
+    if (!REMOTE_CAPABLE_ADAPTER_TYPES.has(input.adapterType)) {
       return null;
     }
 
@@ -104,18 +110,108 @@ export async function resolveEnvironmentExecutionTarget(input: {
     };
   }
 
-  if (
-    (
-      input.adapterType !== "codex_local" &&
-      input.adapterType !== "acpx_local" &&
-      input.adapterType !== "claude_local" &&
-      input.adapterType !== "gemini_local" &&
-      input.adapterType !== "opencode_local" &&
-      input.adapterType !== "pi_local" &&
-      input.adapterType !== "cursor"
-    ) ||
-    input.environment.driver !== "ssh"
-  ) {
+  if (input.environment.driver === "ssm") {
+    if (!REMOTE_CAPABLE_ADAPTER_TYPES.has(input.adapterType)) {
+      return null;
+    }
+
+    const parsed = await resolveEnvironmentDriverConfigForRuntime(input.db, input.companyId, {
+      driver: "ssm",
+      config: parseObject(input.environment.config),
+    });
+    if (parsed.driver !== "ssm") {
+      return null;
+    }
+
+    const cachedInstanceId =
+      typeof input.leaseMetadata?.instanceId === "string" && input.leaseMetadata.instanceId.trim().length > 0
+        ? input.leaseMetadata.instanceId.trim()
+        : null;
+    const instanceId =
+      cachedInstanceId ??
+      (await resolveSsmInstanceByTag({
+        region: parsed.config.region,
+        awsProfile: parsed.config.awsProfile,
+        tagKey: parsed.config.tagKey,
+        tagValue: parsed.config.tagValue,
+      })).instanceId;
+
+    const remoteCwd =
+      typeof input.leaseMetadata?.remoteCwd === "string" && input.leaseMetadata.remoteCwd.trim().length > 0
+        ? input.leaseMetadata.remoteCwd.trim()
+        : parsed.config.remoteWorkspacePath;
+
+    const region = parsed.config.region;
+    const awsProfile = parsed.config.awsProfile;
+
+    return {
+      kind: "remote",
+      transport: "sandbox",
+      providerKey: "ssm",
+      environmentId: input.environment.id ?? null,
+      leaseId: input.leaseId ?? null,
+      remoteCwd,
+      runner: input.environmentRuntime && input.lease
+        ? {
+            execute: async (commandInput) => {
+              const startedAt = new Date().toISOString();
+              const result = await input.environmentRuntime!.execute({
+                environment: input.environment as Environment,
+                lease: input.lease!,
+                command: commandInput.command,
+                args: commandInput.args,
+                cwd: commandInput.cwd ?? remoteCwd,
+                env: commandInput.env,
+                stdin: commandInput.stdin,
+                timeoutMs: commandInput.timeoutMs,
+              });
+              if (result.stdout) await commandInput.onLog?.("stdout", result.stdout);
+              if (result.stderr) await commandInput.onLog?.("stderr", result.stderr);
+              return {
+                exitCode: result.exitCode,
+                signal: result.signal ?? null,
+                timedOut: result.timedOut,
+                stdout: result.stdout,
+                stderr: result.stderr,
+                pid: null,
+                startedAt,
+              };
+            },
+          }
+        : {
+            execute: async (commandInput) => {
+              const startedAt = new Date().toISOString();
+              const cwd = commandInput.cwd ?? remoteCwd;
+              const envPrefix = commandInput.env
+                ? Object.entries(commandInput.env).map(([k, v]) => `export ${k}='${v.replace(/'/g, `'"'"'`)}';`).join(" ")
+                : "";
+              const fullCommand = `cd '${cwd.replace(/'/g, `'"'"'`)}' && ${envPrefix}${commandInput.command}${commandInput.args?.length ? " " + commandInput.args.join(" ") : ""}`;
+
+              const result = await runSsmCommand({
+                region,
+                awsProfile,
+                instanceId,
+                command: fullCommand,
+                timeoutMs: commandInput.timeoutMs ?? 60_000,
+              });
+
+              if (result.stdout) await commandInput.onLog?.("stdout", result.stdout);
+              if (result.stderr) await commandInput.onLog?.("stderr", result.stderr);
+              return {
+                exitCode: result.exitCode,
+                signal: null,
+                timedOut: result.timedOut,
+                stdout: result.stdout,
+                stderr: result.stderr,
+                pid: null,
+                startedAt,
+              };
+            },
+          },
+    };
+  }
+
+  if (!REMOTE_CAPABLE_ADAPTER_TYPES.has(input.adapterType)) {
     return null;
   }
 

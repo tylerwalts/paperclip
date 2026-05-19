@@ -12,6 +12,7 @@ import type {
   SecretProvider,
   SecretVersionSelector,
   SshEnvironmentConfig,
+  SsmEnvironmentConfig,
 } from "@paperclipai/shared";
 import { unprocessable } from "../errors.js";
 import { parseObject } from "../adapters/utils.js";
@@ -66,6 +67,37 @@ const sshEnvironmentConfigProbeSchema = sshEnvironmentConfigSchema.extend({
 
 const sshEnvironmentConfigPersistenceSchema = sshEnvironmentConfigProbeSchema;
 
+const ssmEnvironmentConfigSchema = z.object({
+  region: z
+    .string({ required_error: "SSM environments require an AWS region." })
+    .trim()
+    .min(1, "SSM environments require an AWS region.")
+    .regex(/^[a-z]{2}-[a-z]+-\d+$/, "AWS region must look like 'us-east-1'."),
+  awsProfile: z
+    .string()
+    .trim()
+    .optional()
+    .nullable()
+    .transform((value) => (value && value.length > 0 ? value : null)),
+  tagKey: z
+    .string({ required_error: "SSM environments require a tag key." })
+    .trim()
+    .min(1, "SSM environments require a tag key."),
+  tagValue: z
+    .string({ required_error: "SSM environments require a tag value." })
+    .trim()
+    .min(1, "SSM environments require a tag value."),
+  remoteWorkspacePath: z
+    .string({ required_error: "SSM environments require a remote workspace path." })
+    .trim()
+    .min(1, "SSM environments require a remote workspace path.")
+    .refine((value) => value.startsWith("/"), "SSM remote workspace path must be absolute."),
+}).strict();
+
+const ssmEnvironmentConfigProbeSchema = ssmEnvironmentConfigSchema;
+
+const ssmEnvironmentConfigPersistenceSchema = ssmEnvironmentConfigProbeSchema;
+
 const fakeSandboxEnvironmentConfigSchema = z.object({
   provider: z.literal("fake").default("fake"),
   image: z
@@ -102,6 +134,7 @@ const pluginEnvironmentConfigSchema = z.object({
 export type ParsedEnvironmentConfig =
   | { driver: "local"; config: LocalEnvironmentConfig }
   | { driver: "ssh"; config: SshEnvironmentConfig }
+  | { driver: "ssm"; config: SsmEnvironmentConfig }
   | { driver: "sandbox"; config: SandboxEnvironmentConfig }
   | { driver: "plugin"; config: PluginEnvironmentConfig };
 
@@ -313,6 +346,16 @@ export function normalizeEnvironmentConfig(input: {
     return parsed.data satisfies SshEnvironmentConfig;
   }
 
+  if (input.driver === "ssm") {
+    const parsed = ssmEnvironmentConfigSchema.safeParse(parseObject(input.config));
+    if (!parsed.success) {
+      throw unprocessable(toErrorMessage(parsed.error), {
+        issues: parsed.error.issues,
+      });
+    }
+    return parsed.data satisfies SsmEnvironmentConfig;
+  }
+
   if (input.driver === "sandbox") {
     const parsed = parseSandboxEnvironmentConfig(input.config);
     if (!parsed.success) {
@@ -350,6 +393,16 @@ export function normalizeEnvironmentConfigForProbe(input: {
       });
     }
     return parsed.data satisfies SshEnvironmentConfig;
+  }
+
+  if (input.driver === "ssm") {
+    const parsed = ssmEnvironmentConfigProbeSchema.safeParse(parseObject(input.config));
+    if (!parsed.success) {
+      throw unprocessable(toErrorMessage(parsed.error), {
+        issues: parsed.error.issues,
+      });
+    }
+    return parsed.data satisfies SsmEnvironmentConfig;
   }
 
   if (input.driver === "sandbox") {
@@ -425,6 +478,16 @@ export async function normalizeEnvironmentConfigForPersistence(input: {
       privateKey: null,
       privateKeySecretRef: nextPrivateKeySecretRef,
     } satisfies SshEnvironmentConfig;
+  }
+
+  if (input.driver === "ssm") {
+    const parsed = ssmEnvironmentConfigPersistenceSchema.safeParse(parseObject(input.config));
+    if (!parsed.success) {
+      throw unprocessable(toErrorMessage(parsed.error), {
+        issues: parsed.error.issues,
+      });
+    }
+    return parsed.data satisfies SsmEnvironmentConfig;
   }
 
   if (input.driver === "sandbox") {
@@ -525,6 +588,7 @@ export async function resolveEnvironmentDriverConfigForRuntime(
     };
   }
 
+
   if (parsed.driver === "sandbox" && parsed.config.provider !== "fake") {
     return {
       driver: "sandbox",
@@ -568,6 +632,14 @@ export function parseEnvironmentDriverConfig(
     const parsed = sshEnvironmentConfigSchema.parse(parseObject(environment.config));
     return {
       driver: "ssh",
+      config: parsed,
+    };
+  }
+
+  if (environment.driver === "ssm") {
+    const parsed = ssmEnvironmentConfigSchema.parse(parseObject(environment.config));
+    return {
+      driver: "ssm",
       config: parsed,
     };
   }

@@ -22,6 +22,14 @@ export interface SshEnvironmentConfig {
   strictHostKeyChecking: boolean;
 }
 
+export interface SsmEnvironmentConfig {
+  region: string;
+  awsProfile: string | null;
+  tagKey: string;
+  tagValue: string;
+  remoteWorkspacePath: string;
+}
+
 export type SandboxEnvironmentProvider = "fake" | (string & {});
 
 export interface FakeSandboxEnvironmentConfig {
