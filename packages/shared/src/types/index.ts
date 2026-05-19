@@ -259,6 +259,10 @@ export type {
   SecretProviderConfigPayload,
   SecretProviderConfigHealthDetails,
   SecretProviderConfigHealthResponse,
+  SecretProviderConfigDiscoveryCandidate,
+  SecretProviderConfigDiscoveryPreviewResult,
+  SecretProviderConfigDiscoverySample,
+  SecretProviderConfigDiscoverySignal,
   CompanySecretBinding,
   CompanySecretBindingTarget,
   CompanySecretUsageBinding,
@@ -280,6 +284,7 @@ export type {
 } from "./secrets.js";
 export type {
   Routine,
+  RoutineEnvConfig,
   RoutineManagedByPlugin,
   RoutineVariable,
   RoutineVariableDefaultValue,
