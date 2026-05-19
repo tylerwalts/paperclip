@@ -257,15 +257,7 @@ describe("environment config helpers", () => {
         awsProfile: "  ",
         tagKey: "Paperclip",
         tagValue: "runner-prod",
-        username: "ec2-user",
-        port: "22",
         remoteWorkspacePath: "/home/ec2-user/workspace",
-        privateKeySecretRef: {
-          type: "secret_ref",
-          secretId: "22222222-2222-2222-2222-222222222222",
-          version: "latest",
-        },
-        knownHosts: "",
       },
     });
 
@@ -274,17 +266,7 @@ describe("environment config helpers", () => {
       awsProfile: null,
       tagKey: "Paperclip",
       tagValue: "runner-prod",
-      username: "ec2-user",
-      port: 22,
       remoteWorkspacePath: "/home/ec2-user/workspace",
-      privateKey: null,
-      privateKeySecretRef: {
-        type: "secret_ref",
-        secretId: "22222222-2222-2222-2222-222222222222",
-        version: "latest",
-      },
-      knownHosts: null,
-      strictHostKeyChecking: true,
     });
   });
 
@@ -295,7 +277,6 @@ describe("environment config helpers", () => {
         config: {
           tagKey: "Paperclip",
           tagValue: "runner-prod",
-          username: "ec2-user",
           remoteWorkspacePath: "/home/ec2-user/workspace",
         },
       }),
@@ -310,7 +291,6 @@ describe("environment config helpers", () => {
           region: "us-east-1",
           tagKey: "Paperclip",
           tagValue: "runner-prod",
-          username: "ec2-user",
           remoteWorkspacePath: "relative/path",
         },
       }),
@@ -325,14 +305,13 @@ describe("environment config helpers", () => {
           region: "MyRegion",
           tagKey: "Paperclip",
           tagValue: "runner-prod",
-          username: "ec2-user",
           remoteWorkspacePath: "/home/ec2-user/workspace",
         },
       }),
     ).toThrow(HttpError);
   });
 
-  it("rejects raw SSM private keys in the stored config shape", () => {
+  it("rejects SSM config with unrecognized keys", () => {
     expect(() =>
       normalizeEnvironmentConfig({
         driver: "ssm",
@@ -340,9 +319,8 @@ describe("environment config helpers", () => {
           region: "us-east-1",
           tagKey: "Paperclip",
           tagValue: "runner-prod",
-          username: "ec2-user",
           remoteWorkspacePath: "/home/ec2-user/workspace",
-          privateKey: "PRIVATE KEY",
+          username: "ec2-user",
         },
       }),
     ).toThrow(HttpError);
@@ -356,15 +334,7 @@ describe("environment config helpers", () => {
         awsProfile: "prod",
         tagKey: "Paperclip",
         tagValue: "runner-prod",
-        username: "ec2-user",
-        port: 22,
         remoteWorkspacePath: "/home/ec2-user/workspace",
-        privateKeySecretRef: {
-          type: "secret_ref",
-          secretId: "33333333-3333-3333-3333-333333333333",
-          version: "latest",
-        },
-        strictHostKeyChecking: true,
       },
     });
 
@@ -374,6 +344,7 @@ describe("environment config helpers", () => {
       expect(parsed.config.awsProfile).toBe("prod");
       expect(parsed.config.tagKey).toBe("Paperclip");
       expect(parsed.config.tagValue).toBe("runner-prod");
+      expect(parsed.config.remoteWorkspacePath).toBe("/home/ec2-user/workspace");
     }
   });
 });

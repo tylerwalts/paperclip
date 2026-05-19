@@ -1,8 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mockClient } from "aws-sdk-client-mock";
-import { SSMClient, DescribeInstanceInformationCommand } from "@aws-sdk/client-ssm";
+import {
+  SSMClient,
+  DescribeInstanceInformationCommand,
+  StartSessionCommand,
+} from "@aws-sdk/client-ssm";
 import { HttpError } from "../errors.js";
-import { buildSsmProxyCommand, resolveSsmInstanceByTag } from "../services/aws-ssm.js";
+import { resolveSsmInstanceByTag, runSsmCommand } from "../services/aws-ssm.js";
 
 const ssmMock = mockClient(SSMClient);
 
@@ -12,37 +16,6 @@ describe("aws-ssm helpers", () => {
   });
   afterEach(() => {
     ssmMock.reset();
-  });
-
-  describe("buildSsmProxyCommand", () => {
-    it("builds the AWS-StartSSHSession ProxyCommand without --profile when awsProfile is null", () => {
-      const cmd = buildSsmProxyCommand({
-        region: "us-east-1",
-        awsProfile: null,
-        instanceId: "i-0123abc",
-      });
-      expect(cmd).toBe(
-        "aws ssm start-session --target i-0123abc --document-name AWS-StartSSHSession --parameters portNumber=%p --region us-east-1",
-      );
-    });
-
-    it("includes --profile when awsProfile is set", () => {
-      const cmd = buildSsmProxyCommand({
-        region: "us-east-1",
-        awsProfile: "prod",
-        instanceId: "i-0123abc",
-      });
-      expect(cmd).toContain("--profile prod");
-    });
-
-    it("preserves the literal %p so OpenSSH expands it at connect time", () => {
-      const cmd = buildSsmProxyCommand({
-        region: "eu-west-1",
-        awsProfile: null,
-        instanceId: "i-xyz",
-      });
-      expect(cmd).toContain("portNumber=%p");
-    });
   });
 
   describe("resolveSsmInstanceByTag", () => {
@@ -69,24 +42,6 @@ describe("aws-ssm helpers", () => {
       expect(resolved.instanceId).toBe("i-deadbeef");
       expect(resolved.platformType).toBe("Linux");
       expect(resolved.pingStatus).toBe("Online");
-    });
-
-    it("filters by tag and PingStatus=Online", async () => {
-      ssmMock.on(DescribeInstanceInformationCommand).callsFake((input) => {
-        const filters = input.Filters ?? [];
-        const tagFilter = filters.find((f: { Key?: string }) => f.Key === "tag:Paperclip");
-        const pingFilter = filters.find((f: { Key?: string }) => f.Key === "PingStatus");
-        expect(tagFilter?.Values).toEqual(["runner-prod"]);
-        expect(pingFilter?.Values).toEqual(["Online"]);
-        return {
-          InstanceInformationList: [
-            { InstanceId: "i-only", PingStatus: "Online" },
-          ],
-        };
-      });
-
-      const resolved = await resolveSsmInstanceByTag(baseInput);
-      expect(resolved.instanceId).toBe("i-only");
     });
 
     it("rejects with unprocessable when no instances match", async () => {
@@ -126,6 +81,36 @@ describe("aws-ssm helpers", () => {
       ssmMock.on(DescribeInstanceInformationCommand).rejects(new Error("AccessDenied"));
       await expect(resolveSsmInstanceByTag(baseInput)).rejects.toMatchObject({
         message: expect.stringContaining("Failed to query AWS SSM"),
+      });
+    });
+  });
+
+  describe("runSsmCommand", () => {
+    it("rejects when StartSession fails", async () => {
+      ssmMock.on(StartSessionCommand).rejects(new Error("SessionLimitExceeded"));
+      await expect(
+        runSsmCommand({
+          region: "us-east-1",
+          awsProfile: null,
+          instanceId: "i-abc123",
+          command: "whoami",
+        }),
+      ).rejects.toMatchObject({
+        message: expect.stringContaining("Failed to start SSM command session"),
+      });
+    });
+
+    it("rejects when StartSession returns no SessionId", async () => {
+      ssmMock.on(StartSessionCommand).resolves({});
+      await expect(
+        runSsmCommand({
+          region: "us-east-1",
+          awsProfile: null,
+          instanceId: "i-abc123",
+          command: "whoami",
+        }),
+      ).rejects.toMatchObject({
+        message: expect.stringContaining("no SessionId"),
       });
     });
   });

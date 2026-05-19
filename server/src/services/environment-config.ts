@@ -87,35 +87,14 @@ const ssmEnvironmentConfigSchema = z.object({
     .string({ required_error: "SSM environments require a tag value." })
     .trim()
     .min(1, "SSM environments require a tag value."),
-  username: z
-    .string({ required_error: "SSM environments require a username." })
-    .trim()
-    .min(1, "SSM environments require a username."),
-  port: z.coerce.number().int().min(1).max(65535).default(22),
   remoteWorkspacePath: z
     .string({ required_error: "SSM environments require a remote workspace path." })
     .trim()
     .min(1, "SSM environments require a remote workspace path.")
     .refine((value) => value.startsWith("/"), "SSM remote workspace path must be absolute."),
-  privateKey: z.null().optional().default(null),
-  privateKeySecretRef: secretRefSchema.optional().nullable().default(null),
-  knownHosts: z
-    .string()
-    .trim()
-    .optional()
-    .nullable()
-    .transform((value) => (value && value.length > 0 ? value : null)),
-  strictHostKeyChecking: z.boolean().optional().default(true),
 }).strict();
 
-const ssmEnvironmentConfigProbeSchema = ssmEnvironmentConfigSchema.extend({
-  privateKey: z
-    .string()
-    .trim()
-    .optional()
-    .nullable()
-    .transform((value) => (value && value.length > 0 ? value : null)),
-}).strict();
+const ssmEnvironmentConfigProbeSchema = ssmEnvironmentConfigSchema;
 
 const ssmEnvironmentConfigPersistenceSchema = ssmEnvironmentConfigProbeSchema;
 
@@ -508,32 +487,7 @@ export async function normalizeEnvironmentConfigForPersistence(input: {
         issues: parsed.error.issues,
       });
     }
-    const secrets = secretService(input.db);
-    const { privateKey, ...stored } = parsed.data;
-    let nextPrivateKeySecretRef = stored.privateKeySecretRef;
-    if (privateKey) {
-      nextPrivateKeySecretRef = await createEnvironmentSecret({
-        db: input.db,
-        companyId: input.companyId,
-        environmentName: input.environmentName,
-        driver: input.driver,
-        field: "private-key",
-        provider: input.secretProvider,
-        value: privateKey,
-        actor: input.actor,
-      });
-      if (
-        stored.privateKeySecretRef &&
-        stored.privateKeySecretRef.secretId !== nextPrivateKeySecretRef.secretId
-      ) {
-        await secrets.remove(stored.privateKeySecretRef.secretId);
-      }
-    }
-    return {
-      ...stored,
-      privateKey: null,
-      privateKeySecretRef: nextPrivateKeySecretRef,
-    } satisfies SsmEnvironmentConfig;
+    return parsed.data satisfies SsmEnvironmentConfig;
   }
 
   if (input.driver === "sandbox") {
@@ -634,19 +588,6 @@ export async function resolveEnvironmentDriverConfigForRuntime(
     };
   }
 
-  if (parsed.driver === "ssm" && parsed.config.privateKeySecretRef) {
-    return {
-      driver: "ssm",
-      config: {
-        ...parsed.config,
-        privateKey: await secrets.resolveSecretValue(
-          companyId,
-          parsed.config.privateKeySecretRef.secretId,
-          parsed.config.privateKeySecretRef.version ?? "latest",
-        ),
-      },
-    };
-  }
 
   if (parsed.driver === "sandbox" && parsed.config.provider !== "fake") {
     return {

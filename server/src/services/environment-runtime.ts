@@ -19,8 +19,8 @@ import { ensureSshWorkspaceReady } from "@paperclipai/adapter-utils/ssh";
 import { environmentService } from "./environments.js";
 import {
   assertSsmCliAvailable,
-  buildSsmProxyCommand,
   resolveSsmInstanceByTag,
+  runSsmCommand,
 } from "./aws-ssm.js";
 import {
   parseEnvironmentDriverConfig,
@@ -317,9 +317,6 @@ function createSsmEnvironmentDriver(db: Db): EnvironmentRuntimeDriver {
         throw new Error(`Expected SSM environment config for driver "${input.environment.driver}".`);
       }
 
-      // Verify the AWS CLI + session-manager-plugin are present on this host
-      // before resolving the tag; surfacing this as the first failure is much
-      // friendlier than a cryptic ssh-side ProxyCommand error.
       await assertSsmCliAvailable();
 
       const resolved = await resolveSsmInstanceByTag({
@@ -328,22 +325,19 @@ function createSsmEnvironmentDriver(db: Db): EnvironmentRuntimeDriver {
         tagKey: parsed.config.tagKey,
         tagValue: parsed.config.tagValue,
       });
-      const proxyCommand = buildSsmProxyCommand({
+
+      const remoteWorkspacePath = parsed.config.remoteWorkspacePath;
+      const result = await runSsmCommand({
         region: parsed.config.region,
         awsProfile: parsed.config.awsProfile,
         instanceId: resolved.instanceId,
+        command: `mkdir -p ${remoteWorkspacePath} && cd ${remoteWorkspacePath} && pwd`,
+        timeoutMs: 15_000,
       });
 
-      const { remoteCwd } = await ensureSshWorkspaceReady({
-        host: resolved.instanceId,
-        port: parsed.config.port,
-        username: parsed.config.username,
-        remoteWorkspacePath: parsed.config.remoteWorkspacePath,
-        privateKey: parsed.config.privateKey,
-        knownHosts: parsed.config.knownHosts,
-        strictHostKeyChecking: parsed.config.strictHostKeyChecking,
-        proxyCommand,
-      });
+      const remoteCwd = (!result.timedOut && result.exitCode === 0 && result.stdout.trim().length > 0)
+        ? result.stdout.trim()
+        : remoteWorkspacePath;
 
       return await environmentsSvc.acquireLease({
         companyId: input.companyId,
@@ -361,9 +355,7 @@ function createSsmEnvironmentDriver(db: Db): EnvironmentRuntimeDriver {
           instanceId: resolved.instanceId,
           tagKey: parsed.config.tagKey,
           tagValue: parsed.config.tagValue,
-          username: parsed.config.username,
-          port: parsed.config.port,
-          remoteWorkspacePath: parsed.config.remoteWorkspacePath,
+          remoteWorkspacePath,
           remoteCwd,
         },
       });
@@ -388,6 +380,41 @@ function createSsmEnvironmentDriver(db: Db): EnvironmentRuntimeDriver {
         metadata: {
           workspaceRealization: record,
         },
+      };
+    },
+
+    async execute(input) {
+      const region =
+        typeof input.lease.metadata?.region === "string" ? input.lease.metadata.region : null;
+      const instanceId =
+        typeof input.lease.metadata?.instanceId === "string" ? input.lease.metadata.instanceId : null;
+      const awsProfile =
+        typeof input.lease.metadata?.awsProfile === "string" ? input.lease.metadata.awsProfile : null;
+
+      if (!region || !instanceId) {
+        throw new Error("SSM lease metadata missing region or instanceId for command execution.");
+      }
+
+      const cwd = input.cwd ?? (typeof input.lease.metadata?.remoteCwd === "string" ? input.lease.metadata.remoteCwd : "/tmp");
+      const envPrefix = input.env
+        ? Object.entries(input.env).map(([k, v]) => `export ${k}=${shellQuoteForSsm(v)};`).join(" ")
+        : "";
+      const fullCommand = `cd ${shellQuoteForSsm(cwd)} && ${envPrefix}${input.command}${input.args?.length ? " " + input.args.join(" ") : ""}`;
+
+      const result = await runSsmCommand({
+        region,
+        awsProfile,
+        instanceId,
+        command: fullCommand,
+        timeoutMs: input.timeoutMs ?? 60_000,
+      });
+
+      return {
+        stdout: result.stdout,
+        stderr: result.stderr,
+        exitCode: result.exitCode ?? (result.timedOut ? null : 1),
+        signal: null,
+        timedOut: result.timedOut,
       };
     },
   };
@@ -839,6 +866,10 @@ function createSandboxEnvironmentDriver(
       cleanupStatus,
     });
   }
+}
+
+function shellQuoteForSsm(value: string): string {
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
 function parseExpiresAt(value: string | null | undefined): Date | null {

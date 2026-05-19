@@ -7,7 +7,7 @@ import {
 import { parseObject } from "../adapters/utils.js";
 import { resolveEnvironmentDriverConfigForRuntime } from "./environment-config.js";
 import type { EnvironmentRuntimeService } from "./environment-runtime.js";
-import { buildSsmProxyCommand, resolveSsmInstanceByTag } from "./aws-ssm.js";
+import { resolveSsmInstanceByTag, runSsmCommand } from "./aws-ssm.js";
 
 export const DEFAULT_SANDBOX_REMOTE_CWD = "/tmp";
 
@@ -123,9 +123,6 @@ export async function resolveEnvironmentExecutionTarget(input: {
       return null;
     }
 
-    // The lease metadata may already carry a resolved instanceId from acquire
-    // time. Prefer it so a single agent run pins to the same host even if the
-    // tag fleet changes mid-run; otherwise re-resolve now.
     const cachedInstanceId =
       typeof input.leaseMetadata?.instanceId === "string" && input.leaseMetadata.instanceId.trim().length > 0
         ? input.leaseMetadata.instanceId.trim()
@@ -139,34 +136,78 @@ export async function resolveEnvironmentExecutionTarget(input: {
         tagValue: parsed.config.tagValue,
       })).instanceId;
 
-    const proxyCommand = buildSsmProxyCommand({
-      region: parsed.config.region,
-      awsProfile: parsed.config.awsProfile,
-      instanceId,
-    });
-
     const remoteCwd =
       typeof input.leaseMetadata?.remoteCwd === "string" && input.leaseMetadata.remoteCwd.trim().length > 0
         ? input.leaseMetadata.remoteCwd.trim()
         : parsed.config.remoteWorkspacePath;
 
+    const region = parsed.config.region;
+    const awsProfile = parsed.config.awsProfile;
+
     return {
       kind: "remote",
-      transport: "ssh",
+      transport: "sandbox",
+      providerKey: "ssm",
       environmentId: input.environment.id ?? null,
       leaseId: input.leaseId ?? null,
       remoteCwd,
-      spec: {
-        host: instanceId,
-        port: parsed.config.port,
-        username: parsed.config.username,
-        remoteWorkspacePath: parsed.config.remoteWorkspacePath,
-        privateKey: parsed.config.privateKey,
-        knownHosts: parsed.config.knownHosts,
-        strictHostKeyChecking: parsed.config.strictHostKeyChecking,
-        remoteCwd,
-        proxyCommand,
-      },
+      runner: input.environmentRuntime && input.lease
+        ? {
+            execute: async (commandInput) => {
+              const startedAt = new Date().toISOString();
+              const result = await input.environmentRuntime!.execute({
+                environment: input.environment as Environment,
+                lease: input.lease!,
+                command: commandInput.command,
+                args: commandInput.args,
+                cwd: commandInput.cwd ?? remoteCwd,
+                env: commandInput.env,
+                stdin: commandInput.stdin,
+                timeoutMs: commandInput.timeoutMs,
+              });
+              if (result.stdout) await commandInput.onLog?.("stdout", result.stdout);
+              if (result.stderr) await commandInput.onLog?.("stderr", result.stderr);
+              return {
+                exitCode: result.exitCode,
+                signal: result.signal ?? null,
+                timedOut: result.timedOut,
+                stdout: result.stdout,
+                stderr: result.stderr,
+                pid: null,
+                startedAt,
+              };
+            },
+          }
+        : {
+            execute: async (commandInput) => {
+              const startedAt = new Date().toISOString();
+              const cwd = commandInput.cwd ?? remoteCwd;
+              const envPrefix = commandInput.env
+                ? Object.entries(commandInput.env).map(([k, v]) => `export ${k}='${v.replace(/'/g, `'"'"'`)}';`).join(" ")
+                : "";
+              const fullCommand = `cd '${cwd.replace(/'/g, `'"'"'`)}' && ${envPrefix}${commandInput.command}${commandInput.args?.length ? " " + commandInput.args.join(" ") : ""}`;
+
+              const result = await runSsmCommand({
+                region,
+                awsProfile,
+                instanceId,
+                command: fullCommand,
+                timeoutMs: commandInput.timeoutMs ?? 60_000,
+              });
+
+              if (result.stdout) await commandInput.onLog?.("stdout", result.stdout);
+              if (result.stderr) await commandInput.onLog?.("stderr", result.stderr);
+              return {
+                exitCode: result.exitCode,
+                signal: null,
+                timedOut: result.timedOut,
+                stdout: result.stdout,
+                stderr: result.stderr,
+                pid: null,
+                startedAt,
+              };
+            },
+          },
     };
   }
 
