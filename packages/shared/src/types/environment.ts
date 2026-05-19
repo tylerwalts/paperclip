@@ -27,13 +27,7 @@ export interface SsmEnvironmentConfig {
   awsProfile: string | null;
   tagKey: string;
   tagValue: string;
-  username: string;
-  port: number;
   remoteWorkspacePath: string;
-  privateKey: string | null;
-  privateKeySecretRef: EnvSecretRefBinding | null;
-  knownHosts: string | null;
-  strictHostKeyChecking: boolean;
 }
 
 export type SandboxEnvironmentProvider = "fake" | (string & {});

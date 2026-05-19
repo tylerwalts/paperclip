@@ -1,8 +1,10 @@
-import { execFile } from "node:child_process";
+import { spawn, execFile, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import {
   SSMClient,
   DescribeInstanceInformationCommand,
+  StartSessionCommand,
+  TerminateSessionCommand,
   type InstanceInformation,
 } from "@aws-sdk/client-ssm";
 import { fromIni } from "@aws-sdk/credential-provider-ini";
@@ -24,11 +26,15 @@ export interface SsmResolvedInstance {
   platformType: string | null;
 }
 
+export interface SsmSessionHandle {
+  sessionId: string;
+  process: ChildProcess;
+  region: string;
+  instanceId: string;
+  terminate(): Promise<void>;
+}
+
 function buildSsmClient(input: { region: string; awsProfile: string | null }): SSMClient {
-  // When awsProfile is null we let the AWS SDK's default credential provider
-  // chain resolve credentials — env vars first, then profile from AWS_PROFILE,
-  // then the default profile in ~/.aws/credentials, then EC2 instance metadata.
-  // This matches the user's "works like the AWS CLI does" requirement.
   if (input.awsProfile && input.awsProfile.trim().length > 0) {
     return new SSMClient({
       region: input.region,
@@ -91,52 +97,190 @@ export async function resolveSsmInstanceByTag(
   };
 }
 
-export interface SsmProxyCommandInput {
+export interface SsmStartSessionInput {
   region: string;
   awsProfile: string | null;
   instanceId: string;
+  command?: string[];
 }
 
-// OpenSSH expands %h (host) and %p (port) at connect time. We pass the EC2
-// instance ID as the SSH "host" so %h becomes the SSM target, and let the
-// remote sshd port flow through %p so the user's configured port works.
-export function buildSsmProxyCommand(input: SsmProxyCommandInput): string {
-  const parts = [
-    "aws",
-    "ssm",
-    "start-session",
-    "--target",
-    input.instanceId,
-    "--document-name",
-    "AWS-StartSSHSession",
-    "--parameters",
-    "portNumber=%p",
-    "--region",
-    input.region,
-  ];
-  if (input.awsProfile && input.awsProfile.trim().length > 0) {
-    parts.push("--profile", input.awsProfile.trim());
+export async function startSsmSession(input: SsmStartSessionInput): Promise<SsmSessionHandle> {
+  const client = buildSsmClient(input);
+  let sessionResponse;
+  try {
+    sessionResponse = await client.send(
+      new StartSessionCommand({
+        Target: input.instanceId,
+        DocumentName: "AWS-StartInteractiveCommand",
+        Parameters: {
+          command: input.command ?? ["bash", "-l"],
+        },
+      }),
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw unprocessable(
+      `Failed to start SSM session on ${input.instanceId} in ${input.region}: ${message}`,
+    );
+  } finally {
+    client.destroy();
   }
-  return parts.join(" ");
+
+  if (!sessionResponse.SessionId) {
+    throw unprocessable(
+      `SSM StartSession returned no SessionId for ${input.instanceId} in ${input.region}.`,
+    );
+  }
+
+  const endpoint = `https://ssm.${input.region}.amazonaws.com`;
+  const requestParams = JSON.stringify({ Target: input.instanceId });
+
+  const child = spawn(
+    "session-manager-plugin",
+    [
+      JSON.stringify(sessionResponse),
+      input.region,
+      "StartSession",
+      input.awsProfile ?? "",
+      requestParams,
+      endpoint,
+    ],
+    {
+      stdio: ["pipe", "pipe", "pipe"],
+    },
+  );
+
+  const sessionId = sessionResponse.SessionId;
+
+  return {
+    sessionId,
+    process: child,
+    region: input.region,
+    instanceId: input.instanceId,
+    async terminate() {
+      child.kill("SIGTERM");
+      const terminateClient = buildSsmClient({ region: input.region, awsProfile: input.awsProfile });
+      try {
+        await terminateClient.send(
+          new TerminateSessionCommand({ SessionId: sessionId }),
+        );
+      } catch {
+        // Best-effort cleanup — the session will expire on its own
+      } finally {
+        terminateClient.destroy();
+      }
+    },
+  };
+}
+
+export interface SsmRunCommandInput {
+  region: string;
+  awsProfile: string | null;
+  instanceId: string;
+  command: string;
+  timeoutMs?: number;
+}
+
+export interface SsmRunCommandResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  timedOut: boolean;
+}
+
+export async function runSsmCommand(input: SsmRunCommandInput): Promise<SsmRunCommandResult> {
+  const timeoutMs = input.timeoutMs ?? 30_000;
+  const client = buildSsmClient(input);
+  let sessionResponse;
+  try {
+    sessionResponse = await client.send(
+      new StartSessionCommand({
+        Target: input.instanceId,
+        DocumentName: "AWS-StartNonInteractiveCommand",
+        Parameters: {
+          command: [input.command],
+        },
+      }),
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw unprocessable(
+      `Failed to start SSM command session on ${input.instanceId} in ${input.region}: ${message}`,
+    );
+  } finally {
+    client.destroy();
+  }
+
+  if (!sessionResponse.SessionId) {
+    throw unprocessable(
+      `SSM StartSession returned no SessionId for ${input.instanceId} in ${input.region}.`,
+    );
+  }
+
+  const endpoint = `https://ssm.${input.region}.amazonaws.com`;
+  const requestParams = JSON.stringify({ Target: input.instanceId });
+
+  const child = spawn(
+    "session-manager-plugin",
+    [
+      JSON.stringify(sessionResponse),
+      input.region,
+      "StartSession",
+      input.awsProfile ?? "",
+      requestParams,
+      endpoint,
+    ],
+    {
+      stdio: ["pipe", "pipe", "pipe"],
+    },
+  );
+
+  return new Promise<SsmRunCommandResult>((resolve) => {
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    let timedOut = false;
+    let settled = false;
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+    }, timeoutMs);
+
+    child.stdout?.on("data", (chunk: Buffer) => stdoutChunks.push(chunk));
+    child.stderr?.on("data", (chunk: Buffer) => stderrChunks.push(chunk));
+
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({
+        stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+        stderr: Buffer.concat(stderrChunks).toString("utf8"),
+        exitCode: timedOut ? null : code,
+        timedOut,
+      });
+    });
+
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({
+        stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+        stderr: error.message,
+        exitCode: null,
+        timedOut: false,
+      });
+    });
+  });
 }
 
 let cliCheckCache: { ok: true } | { ok: false; reason: string } | null = null;
 
-// Verifies the AWS CLI v2 and the Session Manager Plugin are installed on the
-// Paperclip host. We cache the positive result for the lifetime of the process
-// (the binaries do not appear/disappear at runtime) but re-probe on failure so
-// the user can install the missing piece without restarting Paperclip.
 export async function assertSsmCliAvailable(): Promise<void> {
   if (cliCheckCache?.ok === true) return;
 
   const errors: string[] = [];
-  try {
-    await execFileP("aws", ["--version"], { timeout: 5_000 });
-  } catch (error) {
-    errors.push(
-      `aws CLI is not installed or not on PATH (${error instanceof Error ? error.message : String(error)}).`,
-    );
-  }
   try {
     await execFileP("session-manager-plugin", ["--version"], { timeout: 5_000 });
   } catch (error) {

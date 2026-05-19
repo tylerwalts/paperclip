@@ -11,8 +11,8 @@ import { probePluginEnvironmentDriver, probePluginSandboxProviderDriver } from "
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 import {
   assertSsmCliAvailable,
-  buildSsmProxyCommand,
   resolveSsmInstanceByTag,
+  runSsmCommand,
 } from "./aws-ssm.js";
 
 export async function probeEnvironment(
@@ -89,21 +89,48 @@ export async function probeEnvironment(
         tagKey: parsed.config.tagKey,
         tagValue: parsed.config.tagValue,
       });
-      const proxyCommand = buildSsmProxyCommand({
+
+      const remoteWorkspacePath = parsed.config.remoteWorkspacePath;
+      const result = await runSsmCommand({
         region: parsed.config.region,
         awsProfile: parsed.config.awsProfile,
         instanceId: resolved.instanceId,
+        command: `mkdir -p ${remoteWorkspacePath} && cd ${remoteWorkspacePath} && pwd`,
+        timeoutMs: 15_000,
       });
-      const { remoteCwd } = await ensureSshWorkspaceReady({
-        host: resolved.instanceId,
-        port: parsed.config.port,
-        username: parsed.config.username,
-        remoteWorkspacePath: parsed.config.remoteWorkspacePath,
-        privateKey: parsed.config.privateKey,
-        knownHosts: parsed.config.knownHosts,
-        strictHostKeyChecking: parsed.config.strictHostKeyChecking,
-        proxyCommand,
-      });
+
+      if (result.timedOut) {
+        return {
+          ok: false,
+          driver: "ssm",
+          summary: `SSM session timed out verifying workspace on ${resolved.instanceId}.`,
+          details: {
+            region: parsed.config.region,
+            instanceId: resolved.instanceId,
+            tagKey: parsed.config.tagKey,
+            tagValue: parsed.config.tagValue,
+            remoteWorkspacePath,
+          },
+        };
+      }
+
+      if (result.exitCode !== 0) {
+        return {
+          ok: false,
+          driver: "ssm",
+          summary: `SSM probe failed: could not verify workspace path on ${resolved.instanceId}.`,
+          details: {
+            region: parsed.config.region,
+            instanceId: resolved.instanceId,
+            tagKey: parsed.config.tagKey,
+            tagValue: parsed.config.tagValue,
+            remoteWorkspacePath,
+            error: result.stderr.trim() || result.stdout.trim(),
+          },
+        };
+      }
+
+      const remoteCwd = result.stdout.trim() || remoteWorkspacePath;
 
       return {
         ok: true,
@@ -114,9 +141,7 @@ export async function probeEnvironment(
           instanceId: resolved.instanceId,
           tagKey: parsed.config.tagKey,
           tagValue: parsed.config.tagValue,
-          username: parsed.config.username,
-          port: parsed.config.port,
-          remoteWorkspacePath: parsed.config.remoteWorkspacePath,
+          remoteWorkspacePath,
           remoteCwd,
           platformType: resolved.platformType,
         },
@@ -143,8 +168,6 @@ export async function probeEnvironment(
           region: parsed.config.region,
           tagKey: parsed.config.tagKey,
           tagValue: parsed.config.tagValue,
-          username: parsed.config.username,
-          port: parsed.config.port,
           remoteWorkspacePath: parsed.config.remoteWorkspacePath,
           error: message,
         },
