@@ -1,6 +1,6 @@
 import type { AgentAdapterType, EnvironmentDriver } from "./constants.js";
 import type { SandboxEnvironmentProvider } from "./types/environment.js";
-import type { JsonSchema } from "./types/plugin.js";
+import type { JsonSchema, PluginEnvironmentTemplateConfigBinding } from "./types/plugin.js";
 
 export type EnvironmentSupportStatus = "supported" | "unsupported";
 
@@ -16,6 +16,12 @@ export interface EnvironmentProviderCapability {
   supportsUnsavedProbe: boolean;
   supportsRunExecution: boolean;
   supportsReusableLeases: boolean;
+  supportsInteractiveSetup: boolean;
+  interactiveSetupConnectionTypes: string[];
+  supportsTemplateCapture: boolean;
+  templateRefKind?: string;
+  templateConfigBinding?: PluginEnvironmentTemplateConfigBinding;
+  supportsTemplateDelete: boolean;
   displayName?: string;
   description?: string;
   source?: "builtin" | "plugin";
@@ -31,11 +37,11 @@ export interface EnvironmentCapabilities {
 }
 
 const REMOTE_MANAGED_ADAPTERS = new Set<AgentAdapterType>([
-  "acpx_local",
   "claude_local",
   "codex_local",
   "cursor",
   "gemini_local",
+  "grok_local",
   "opencode_local",
   "pi_local",
 ]);
@@ -46,7 +52,7 @@ export function adapterSupportsRemoteManagedEnvironments(adapterType: string): b
 
 export function supportedEnvironmentDriversForAdapter(adapterType: string): EnvironmentDriver[] {
   return adapterSupportsRemoteManagedEnvironments(adapterType)
-    ? ["local", "ssh", "sandbox"]
+    ? ["local", "ssh", "ssm", "sandbox"]
     : ["local"];
 }
 
@@ -96,6 +102,7 @@ export function getAdapterEnvironmentSupport(
     drivers: {
       local: supportedDrivers.has("local") ? "supported" : "unsupported",
       ssh: supportedDrivers.has("ssh") ? "supported" : "unsupported",
+      ssm: supportedDrivers.has("ssm") ? "supported" : "unsupported",
       sandbox: supportedDrivers.has("sandbox") ? "supported" : "unsupported",
       plugin: supportedDrivers.has("plugin") ? "supported" : "unsupported",
     },
@@ -117,6 +124,10 @@ export function getEnvironmentCapabilities(
       supportsUnsavedProbe: true,
       supportsRunExecution: false,
       supportsReusableLeases: true,
+      supportsInteractiveSetup: false,
+      interactiveSetupConnectionTypes: [],
+      supportsTemplateCapture: false,
+      supportsTemplateDelete: false,
       displayName: "Fake",
       source: "builtin",
     },
@@ -128,6 +139,12 @@ export function getEnvironmentCapabilities(
       supportsUnsavedProbe: capability.supportsUnsavedProbe ?? true,
       supportsRunExecution: capability.supportsRunExecution ?? true,
       supportsReusableLeases: capability.supportsReusableLeases ?? true,
+      supportsInteractiveSetup: capability.supportsInteractiveSetup ?? false,
+      interactiveSetupConnectionTypes: capability.interactiveSetupConnectionTypes ?? [],
+      supportsTemplateCapture: capability.supportsTemplateCapture ?? false,
+      templateRefKind: capability.templateRefKind,
+      templateConfigBinding: capability.templateConfigBinding,
+      supportsTemplateDelete: capability.supportsTemplateDelete ?? false,
       displayName: capability.displayName,
       description: capability.description,
       source: capability.source ?? "plugin",
@@ -141,6 +158,7 @@ export function getEnvironmentCapabilities(
     drivers: {
       local: "supported",
       ssh: "supported",
+      ssm: "supported",
       sandbox: "supported",
       plugin: "unsupported",
     },
