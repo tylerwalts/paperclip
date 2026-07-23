@@ -39,13 +39,7 @@ type EnvironmentFormState = {
   ssmAwsProfile: string;
   ssmTagKey: string;
   ssmTagValue: string;
-  ssmUsername: string;
-  ssmPort: string;
   ssmRemoteWorkspacePath: string;
-  ssmPrivateKey: string;
-  ssmPrivateKeySecretId: string;
-  ssmKnownHosts: string;
-  ssmStrictHostKeyChecking: boolean;
   sandboxProvider: string;
   sandboxConfig: Record<string, unknown>;
 };
@@ -81,16 +75,7 @@ function buildEnvironmentPayload(form: EnvironmentFormState) {
               awsProfile: form.ssmAwsProfile.trim() || null,
               tagKey: form.ssmTagKey.trim(),
               tagValue: form.ssmTagValue.trim(),
-              username: form.ssmUsername.trim(),
-              port: Number.parseInt(form.ssmPort || "22", 10) || 22,
               remoteWorkspacePath: form.ssmRemoteWorkspacePath.trim(),
-              privateKey: form.ssmPrivateKey.trim() || null,
-              privateKeySecretRef:
-                form.ssmPrivateKey.trim().length > 0 || !form.ssmPrivateKeySecretId
-                  ? null
-                  : { type: "secret_ref" as const, secretId: form.ssmPrivateKeySecretId, version: "latest" as const },
-              knownHosts: form.ssmKnownHosts.trim() || null,
-              strictHostKeyChecking: form.ssmStrictHostKeyChecking,
             }
           : form.driver === "sandbox"
             ? {
@@ -118,13 +103,7 @@ function createEmptyEnvironmentForm(): EnvironmentFormState {
     ssmAwsProfile: "",
     ssmTagKey: "",
     ssmTagValue: "",
-    ssmUsername: "",
-    ssmPort: "22",
     ssmRemoteWorkspacePath: "",
-    ssmPrivateKey: "",
-    ssmPrivateKeySecretId: "",
-    ssmKnownHosts: "",
-    ssmStrictHostKeyChecking: true,
     sandboxProvider: "",
     sandboxConfig: {},
   };
@@ -166,28 +145,8 @@ function readSsmConfig(environment: Environment) {
     awsProfile: typeof config.awsProfile === "string" ? config.awsProfile : "",
     tagKey: typeof config.tagKey === "string" ? config.tagKey : "",
     tagValue: typeof config.tagValue === "string" ? config.tagValue : "",
-    username: typeof config.username === "string" ? config.username : "",
-    port:
-      typeof config.port === "number"
-        ? String(config.port)
-        : typeof config.port === "string"
-          ? config.port
-          : "22",
     remoteWorkspacePath:
       typeof config.remoteWorkspacePath === "string" ? config.remoteWorkspacePath : "",
-    privateKey: "",
-    privateKeySecretId:
-      config.privateKeySecretRef &&
-      typeof config.privateKeySecretRef === "object" &&
-      !Array.isArray(config.privateKeySecretRef) &&
-      typeof (config.privateKeySecretRef as { secretId?: unknown }).secretId === "string"
-        ? String((config.privateKeySecretRef as { secretId: string }).secretId)
-        : "",
-    knownHosts: typeof config.knownHosts === "string" ? config.knownHosts : "",
-    strictHostKeyChecking:
-      typeof config.strictHostKeyChecking === "boolean"
-        ? config.strictHostKeyChecking
-        : true,
   };
 }
 
@@ -392,13 +351,7 @@ export function CompanyEnvironments() {
         ssmAwsProfile: ssm.awsProfile,
         ssmTagKey: ssm.tagKey,
         ssmTagValue: ssm.tagValue,
-        ssmUsername: ssm.username,
-        ssmPort: ssm.port,
         ssmRemoteWorkspacePath: ssm.remoteWorkspacePath,
-        ssmPrivateKey: ssm.privateKey,
-        ssmPrivateKeySecretId: ssm.privateKeySecretId,
-        ssmKnownHosts: ssm.knownHosts,
-        ssmStrictHostKeyChecking: ssm.strictHostKeyChecking,
       });
       return;
     }
@@ -850,24 +803,6 @@ export function CompanyEnvironments() {
                     onChange={(e) => setEnvironmentForm((current) => ({ ...current, ssmTagValue: e.target.value }))}
                   />
                 </Field>
-                <Field label="Username" hint="SSH login user on the EC2 host (e.g. ec2-user, ubuntu).">
-                  <input
-                    className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
-                    type="text"
-                    value={environmentForm.ssmUsername}
-                    onChange={(e) => setEnvironmentForm((current) => ({ ...current, ssmUsername: e.target.value }))}
-                  />
-                </Field>
-                <Field label="Port" hint="sshd port on the target. Defaults to 22. Bind sshd to 127.0.0.1 — the SSM tunnel reaches it without an open security group.">
-                  <input
-                    className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
-                    type="number"
-                    min={1}
-                    max={65535}
-                    value={environmentForm.ssmPort}
-                    onChange={(e) => setEnvironmentForm((current) => ({ ...current, ssmPort: e.target.value }))}
-                  />
-                </Field>
                 <Field label="Remote workspace path" hint="Absolute path Paperclip will verify during connection tests.">
                   <input
                     className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
@@ -878,47 +813,6 @@ export function CompanyEnvironments() {
                       setEnvironmentForm((current) => ({ ...current, ssmRemoteWorkspacePath: e.target.value }))}
                   />
                 </Field>
-                <Field label="Private key" hint="PEM private key matching authorized_keys for the user above.">
-                  <div className="space-y-2">
-                    <select
-                      className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
-                      value={environmentForm.ssmPrivateKeySecretId}
-                      onChange={(e) =>
-                        setEnvironmentForm((current) => ({
-                          ...current,
-                          ssmPrivateKeySecretId: e.target.value,
-                          ssmPrivateKey: e.target.value ? "" : current.ssmPrivateKey,
-                        }))}
-                    >
-                      <option value="">No saved secret</option>
-                      {(secrets ?? []).map((secret) => (
-                        <option key={secret.id} value={secret.id}>{secret.name}</option>
-                      ))}
-                    </select>
-                    <textarea
-                      className="h-32 w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-xs font-mono outline-none"
-                      value={environmentForm.ssmPrivateKey}
-                      disabled={!!environmentForm.ssmPrivateKeySecretId}
-                      onChange={(e) => setEnvironmentForm((current) => ({ ...current, ssmPrivateKey: e.target.value }))}
-                    />
-                  </div>
-                </Field>
-                <Field label="Known hosts" hint="Optional known_hosts block used when strict host key checking is enabled.">
-                  <textarea
-                    className="h-32 w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-xs font-mono outline-none"
-                    value={environmentForm.ssmKnownHosts}
-                    onChange={(e) => setEnvironmentForm((current) => ({ ...current, ssmKnownHosts: e.target.value }))}
-                  />
-                </Field>
-                <div className="md:col-span-2">
-                  <ToggleField
-                    label="Strict host key checking"
-                    hint="Keep this on unless you deliberately want probe-time host key acceptance disabled."
-                    checked={environmentForm.ssmStrictHostKeyChecking}
-                    onChange={(checked) =>
-                      setEnvironmentForm((current) => ({ ...current, ssmStrictHostKeyChecking: checked }))}
-                  />
-                </div>
               </div>
             ) : null}
 

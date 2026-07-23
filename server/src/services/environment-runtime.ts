@@ -399,13 +399,38 @@ function createSsmEnvironmentDriver(db: Db): EnvironmentRuntimeDriver {
       const envPrefix = input.env
         ? Object.entries(input.env).map(([k, v]) => `export ${k}=${shellQuoteForSsm(v)};`).join(" ")
         : "";
-      const fullCommand = `cd ${shellQuoteForSsm(cwd)} && ${envPrefix}${input.command}${input.args?.length ? " " + input.args.join(" ") : ""}`;
+      const cmd = input.command;
+      const args = input.args ?? [];
+      let scriptBody: string;
+      if ((cmd === "bash" || cmd === "sh") && args[0] === "-c" && args.length >= 2) {
+        scriptBody = args.slice(1).join(" ");
+      } else {
+        const argsStr = args.length
+          ? " " + args.map((a) => shellQuoteForSsm(a)).join(" ")
+          : "";
+        scriptBody = `${cmd}${argsStr}`;
+      }
+      const fullCommand = `cd ${shellQuoteForSsm(cwd)} && ${envPrefix}${scriptBody}`;
+
+      // Use largeOutput for the main adapter process command (claude CLI
+      // invocation with --output-format, has long timeout). This captures
+      // full stdout via S3 to avoid the 24KB GetCommandInvocation limit.
+      const timeoutCheck = (input.timeoutMs ?? 60_000) > 300_000;
+      const claudeCheck = /\bclaude\b/.test(scriptBody);
+      const fmtCheck = /output-format/.test(scriptBody);
+      const useLargeOutput = timeoutCheck && claudeCheck && fmtCheck;
+      const s3Bucket = process.env.PAPERCLIP_SSM_OUTPUT_BUCKET || process.env.CONFIG_BUCKET_NAME || "";
+
+      console.error(`[ssm-exec] cmd=${cmd} timeout=${input.timeoutMs} timeoutCheck=${timeoutCheck} claudeCheck=${claudeCheck} fmtCheck=${fmtCheck} useLargeOutput=${useLargeOutput} s3Bucket=${s3Bucket} scriptBody.len=${scriptBody.length} scriptBody.head=${scriptBody.slice(0, 60)}`);
 
       const result = await runSsmCommand({
         region,
         awsProfile,
         instanceId,
         command: fullCommand,
+        stdin: input.stdin,
+        largeOutput: useLargeOutput,
+        outputS3Bucket: useLargeOutput ? s3Bucket : undefined,
         timeoutMs: input.timeoutMs ?? 60_000,
       });
 

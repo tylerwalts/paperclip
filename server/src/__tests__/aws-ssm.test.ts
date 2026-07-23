@@ -3,7 +3,8 @@ import { mockClient } from "aws-sdk-client-mock";
 import {
   SSMClient,
   DescribeInstanceInformationCommand,
-  StartSessionCommand,
+  SendCommandCommand,
+  GetCommandInvocationCommand,
 } from "@aws-sdk/client-ssm";
 import { HttpError } from "../errors.js";
 import { resolveSsmInstanceByTag, runSsmCommand } from "../services/aws-ssm.js";
@@ -86,8 +87,8 @@ describe("aws-ssm helpers", () => {
   });
 
   describe("runSsmCommand", () => {
-    it("rejects when StartSession fails", async () => {
-      ssmMock.on(StartSessionCommand).rejects(new Error("SessionLimitExceeded"));
+    it("rejects when SendCommand fails", async () => {
+      ssmMock.on(SendCommandCommand).rejects(new Error("AccessDenied"));
       await expect(
         runSsmCommand({
           region: "us-east-1",
@@ -96,12 +97,12 @@ describe("aws-ssm helpers", () => {
           command: "whoami",
         }),
       ).rejects.toMatchObject({
-        message: expect.stringContaining("Failed to start SSM command session"),
+        message: expect.stringContaining("Failed to start SSM command"),
       });
     });
 
-    it("rejects when StartSession returns no SessionId", async () => {
-      ssmMock.on(StartSessionCommand).resolves({});
+    it("rejects when SendCommand returns no CommandId", async () => {
+      ssmMock.on(SendCommandCommand).resolves({ Command: {} });
       await expect(
         runSsmCommand({
           region: "us-east-1",
@@ -110,8 +111,73 @@ describe("aws-ssm helpers", () => {
           command: "whoami",
         }),
       ).rejects.toMatchObject({
-        message: expect.stringContaining("no SessionId"),
+        message: expect.stringContaining("SendCommand returned no CommandId"),
       });
+    });
+
+    it("returns stdout/stderr when command succeeds", async () => {
+      ssmMock.on(SendCommandCommand).resolves({ Command: { CommandId: "cmd-123" } });
+      ssmMock.on(GetCommandInvocationCommand).resolves({
+        Status: "Success",
+        StandardOutputContent: "ubuntu\n",
+        StandardErrorContent: "",
+        ResponseCode: 0,
+      });
+
+      const result = await runSsmCommand({
+        region: "us-east-1",
+        awsProfile: null,
+        instanceId: "i-abc123",
+        command: "whoami",
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toBe("ubuntu\n");
+      expect(result.stderr).toBe("");
+      expect(result.timedOut).toBe(false);
+    });
+
+    it("returns exit code when command fails", async () => {
+      ssmMock.on(SendCommandCommand).resolves({ Command: { CommandId: "cmd-456" } });
+      ssmMock.on(GetCommandInvocationCommand).resolves({
+        Status: "Failed",
+        StandardOutputContent: "",
+        StandardErrorContent: "command not found\n",
+        ResponseCode: 127,
+      });
+
+      const result = await runSsmCommand({
+        region: "us-east-1",
+        awsProfile: null,
+        instanceId: "i-abc123",
+        command: "unknown-command",
+      });
+
+      expect(result.exitCode).toBe(127);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toBe("command not found\n");
+      expect(result.timedOut).toBe(false);
+    });
+
+    it("reports timeout when command times out", async () => {
+      ssmMock.on(SendCommandCommand).resolves({ Command: { CommandId: "cmd-789" } });
+      ssmMock.on(GetCommandInvocationCommand).resolves({
+        Status: "TimedOut",
+        StandardOutputContent: "",
+        StandardErrorContent: "",
+        ResponseCode: null,
+      });
+
+      const result = await runSsmCommand({
+        region: "us-east-1",
+        awsProfile: null,
+        instanceId: "i-abc123",
+        command: "sleep 100",
+        timeoutMs: 1000,
+      });
+
+      expect(result.exitCode).toBeNull();
+      expect(result.timedOut).toBe(true);
     });
   });
 });

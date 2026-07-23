@@ -185,13 +185,34 @@ export async function resolveEnvironmentExecutionTarget(input: {
               const envPrefix = commandInput.env
                 ? Object.entries(commandInput.env).map(([k, v]) => `export ${k}='${v.replace(/'/g, `'"'"'`)}';`).join(" ")
                 : "";
-              const fullCommand = `cd '${cwd.replace(/'/g, `'"'"'`)}' && ${envPrefix}${commandInput.command}${commandInput.args?.length ? " " + commandInput.args.join(" ") : ""}`;
+              // AWS-RunShellScript already executes through /bin/sh, so when the
+              // caller wants `bash -c <script>` or `sh -c <script>`, emit the
+              // script directly to avoid double-shell quoting issues.
+              let scriptBody: string;
+              const cmd = commandInput.command;
+              const args = commandInput.args ?? [];
+              if ((cmd === "bash" || cmd === "sh") && args[0] === "-c" && args.length >= 2) {
+                scriptBody = args.slice(1).join(" ");
+              } else {
+                const argsStr = args.length
+                  ? " " + args.map((a) => `'${a.replace(/'/g, `'"'"'`)}'`).join(" ")
+                  : "";
+                scriptBody = `${cmd}${argsStr}`;
+              }
+              const fullCommand = `cd '${cwd.replace(/'/g, `'"'"'`)}' && ${envPrefix}${scriptBody}`;
 
+              const useLargeOutput =
+                (commandInput.timeoutMs ?? 60_000) > 300_000 &&
+                /\bclaude\b/.test(scriptBody) &&
+                /output-format/.test(scriptBody);
               const result = await runSsmCommand({
                 region,
                 awsProfile,
                 instanceId,
                 command: fullCommand,
+                stdin: commandInput.stdin,
+                largeOutput: useLargeOutput,
+                outputS3Bucket: useLargeOutput ? (process.env.PAPERCLIP_SSM_OUTPUT_BUCKET || process.env.CONFIG_BUCKET_NAME || "") : undefined,
                 timeoutMs: commandInput.timeoutMs ?? 60_000,
               });
 
