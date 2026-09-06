@@ -188,6 +188,62 @@ describe("buildPluginWorkerEnv", () => {
     });
   });
 
+  it("passes AWS container credential discovery vars to environment driver plugins", () => {
+    // On ECS/Fargate the task role is reachable only through the relative-URI var;
+    // without it the SDK's provider chain finds nothing and the plugin fails with
+    // "Could not load credentials from any providers".
+    const env = buildPluginWorkerEnv({
+      manifest: { capabilities: ["environment.drivers.register"] },
+      instanceInfo,
+      processEnv: {
+        AWS_CONTAINER_CREDENTIALS_RELATIVE_URI: "/v2/credentials/abc123",
+        AWS_REGION: "us-west-2",
+        AWS_ROLE_ARN: " ",
+      },
+    });
+
+    expect(env).toEqual({
+      PAPERCLIP_DEPLOYMENT_MODE: "authenticated",
+      PAPERCLIP_DEPLOYMENT_EXPOSURE: "public",
+      AWS_CONTAINER_CREDENTIALS_RELATIVE_URI: "/v2/credentials/abc123",
+      AWS_REGION: "us-west-2",
+    });
+  });
+
+  it("never passes static AWS keys, even to environment driver plugins", () => {
+    // The passthrough is endpoints and token paths. Long-lived key material stays
+    // stripped; deployments using static keys hand the plugin a profile via its config.
+    const env = buildPluginWorkerEnv({
+      manifest: { capabilities: ["environment.drivers.register"] },
+      instanceInfo,
+      processEnv: {
+        AWS_ACCESS_KEY_ID: "AKIAEXAMPLE",
+        AWS_SECRET_ACCESS_KEY: "aws-secret",
+        AWS_SESSION_TOKEN: "session-token",
+      },
+    });
+
+    expect(env).toEqual({
+      PAPERCLIP_DEPLOYMENT_MODE: "authenticated",
+      PAPERCLIP_DEPLOYMENT_EXPOSURE: "public",
+    });
+  });
+
+  it("does not pass AWS credential vars to non-environment plugins", () => {
+    const env = buildPluginWorkerEnv({
+      manifest: { capabilities: ["ui.slots.register"] },
+      instanceInfo,
+      processEnv: {
+        AWS_CONTAINER_CREDENTIALS_RELATIVE_URI: "/v2/credentials/abc123",
+      },
+    });
+
+    expect(env).toEqual({
+      PAPERCLIP_DEPLOYMENT_MODE: "authenticated",
+      PAPERCLIP_DEPLOYMENT_EXPOSURE: "public",
+    });
+  });
+
   it("does not pass provider keys to non-environment plugins", () => {
     const env = buildPluginWorkerEnv({
       manifest: { capabilities: ["ui.slots.register"] },

@@ -118,6 +118,46 @@ const K8S_IN_CLUSTER_ENV_PASSTHROUGH = [
   "KUBERNETES_SERVICE_PORT_HTTPS",
 ];
 
+/**
+ * AWS credential- and region-discovery vars for sandbox-provider plugins that call
+ * AWS (e.g. `paperclip-plugin-aws-ssm-environment`).
+ *
+ * Plugin workers run with a stripped environment, which silently breaks the AWS SDK's
+ * default credential chain on container hosts: on ECS/Fargate the task role is
+ * reachable *only* via `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`, so with it absent
+ * every provider comes up empty and the plugin fails with "Could not load credentials
+ * from any providers". EC2 hosts are unaffected because IMDS needs no env, which is
+ * why this only shows up once the host is containerised.
+ *
+ * These are endpoints and token *paths*, not static keys — with one exception:
+ * `AWS_CONTAINER_AUTHORIZATION_TOKEN` is bearer material for the full-URI form. That
+ * is inherent to the capability: a sandbox provider that manages AWS compute has to be
+ * able to assume the host's role. Static `AWS_SECRET_ACCESS_KEY`-style credentials are
+ * deliberately NOT forwarded; deployments using those should hand the plugin a profile
+ * through its own config instead.
+ *
+ * Gated, like ADAPTER_ENV_PASSTHROUGH and K8S_IN_CLUSTER_ENV_PASSTHROUGH, on the
+ * manifest declaring `environment.drivers.register`.
+ */
+const AWS_CREDENTIAL_ENV_PASSTHROUGH = [
+  "AWS_REGION",
+  "AWS_DEFAULT_REGION",
+  // ECS / Fargate task role.
+  "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+  // EKS Pod Identity and other container credential providers.
+  "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+  "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+  "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+  // IRSA / web-identity federation.
+  "AWS_WEB_IDENTITY_TOKEN_FILE",
+  "AWS_ROLE_ARN",
+  "AWS_ROLE_SESSION_NAME",
+  // Endpoint resolution knobs that change which STS endpoint the chain calls.
+  "AWS_STS_REGIONAL_ENDPOINTS",
+  "AWS_USE_FIPS_ENDPOINT",
+  "AWS_EC2_METADATA_DISABLED",
+];
+
 export function buildPluginWorkerEnv(input: {
   manifest: Pick<PaperclipPluginManifestV1, "capabilities">;
   instanceInfo: { deploymentMode?: string | null; deploymentExposure?: string | null };
@@ -132,7 +172,11 @@ export function buildPluginWorkerEnv(input: {
     && input.manifest.capabilities.includes("environment.drivers.register");
   if (!canRegisterEnvironmentDrivers) return env;
 
-  for (const key of [...ADAPTER_ENV_PASSTHROUGH, ...K8S_IN_CLUSTER_ENV_PASSTHROUGH]) {
+  for (const key of [
+    ...ADAPTER_ENV_PASSTHROUGH,
+    ...K8S_IN_CLUSTER_ENV_PASSTHROUGH,
+    ...AWS_CREDENTIAL_ENV_PASSTHROUGH,
+  ]) {
     const value = processEnv[key];
     if (value && value.trim().length > 0) {
       env[key] = value;

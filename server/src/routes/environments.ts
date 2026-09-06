@@ -433,7 +433,8 @@ export function environmentRoutes(
    * Pick the company context used to create new secrets from raw-pasted
    * values, normalize env-var bindings, and resolve probe secrets. An
    * explicit route param / query wins, then the single company the
-   * environment's bindings already live in, then the actor's own company.
+   * environment's bindings already live in, then the actor's own company,
+   * and finally the instance's own company when it only has one.
    * Bindings must never veto an explicit caller context: config-derived
    * bindings live in the company that owns each referenced secret (see
    * `replaceSecretRefsForInstanceTarget`), so an environment's bindings may
@@ -462,6 +463,22 @@ export function environmentRoutes(
       return req.actor.companyIds[0] ?? null;
     }
     if (!options.required) return null;
+    // Instance-scoped writes are gated to `local_implicit` / instance admins
+    // (see `assertCanAccessInstanceEnvironments`), and those actors carry no
+    // company membership of their own — `local_implicit` has no `companyIds`
+    // at all, and an instance admin sees every company without a membership
+    // row. So the rungs above cannot resolve a company for exactly the callers
+    // the write path allows. A single-company instance has one unambiguous
+    // answer; use it, mirroring `resolveCustomImageCompanyId`. Only for
+    // required callers: an optional caller (probe) treats `null` as "resolve
+    // no secrets", and widening its company context is a real behavior change,
+    // whereas a write has no answer at all without one. Never guess when
+    // several companies exist either way — this choice decides which company
+    // owns any secret created from a raw-pasted value.
+    if (req.actor.type === "board" && (req.actor.source === "local_implicit" || req.actor.isInstanceAdmin)) {
+      const instanceCompanyIds = await instanceSettings.listCompanyIds();
+      if (instanceCompanyIds.length === 1 && instanceCompanyIds[0]) return instanceCompanyIds[0];
+    }
     throw unprocessable(
       "Environment secret management requires a companyId context during the instance-scoped transition.",
     );

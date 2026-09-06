@@ -81,6 +81,13 @@ export const environmentsApi = {
     config?: Record<string, unknown>;
     metadata?: Record<string, unknown> | null;
   }) => api.post<Environment>(`/companies/${companyId}/environments`, body),
+  /**
+   * Environments are instance-scoped, but a save that touches `config`,
+   * `driver`, or `envVars` still needs a company context server-side to own
+   * any secret created from a raw-pasted value. Pass the board's selected
+   * company — the same context `create` gets from its route — so the server
+   * never has to infer it.
+   */
   update: (environmentId: string, body: {
     name?: string;
     description?: string | null;
@@ -88,7 +95,13 @@ export const environmentsApi = {
     status?: "active" | "archived";
     config?: Record<string, unknown>;
     metadata?: Record<string, unknown> | null;
-  }) => api.patch<EnvironmentUpdateResult>(`/environments/${environmentId}`, body),
+  }, companyId?: string | null) =>
+    api.patch<EnvironmentUpdateResult>(
+      companyId
+        ? `/environments/${environmentId}?${customImageCompanyQuery(companyId)}`
+        : `/environments/${environmentId}`,
+      body,
+    ),
   probe: (environmentId: string, companyId?: string | null) =>
     api.post<EnvironmentProbeResult>(
       companyId

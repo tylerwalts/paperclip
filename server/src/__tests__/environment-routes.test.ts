@@ -2266,6 +2266,67 @@ describe("environment routes", () => {
     expect(res.body.error).toContain("was not found");
   });
 
+  it("saves a config change without an explicit companyId by falling back to the instance's only company", async () => {
+    // The write path is gated to instance admins, who carry no company
+    // membership of their own — so without this fallback every re-save of a
+    // plugin/sandbox environment whose config holds no secret refs (hence no
+    // bindings to infer from) failed, while the create that produced it
+    // succeeded on its company-scoped route.
+    const existing = { ...createEnvironment(), id: "env-1", config: { shell: "zsh" } };
+    mockEnvironmentService.getById.mockResolvedValue(existing);
+    mockEnvironmentService.update.mockResolvedValue({ ...existing, config: { shell: "bash" } });
+    mockSecretService.listBindingCompanyIdsForTarget.mockResolvedValue([]);
+    mockInstanceSettingsService.listCompanyIds.mockResolvedValue(["company-1"]);
+    const app = createApp({
+      type: "board",
+      userId: "user-1",
+      source: "session",
+      companyIds: [],
+      isInstanceAdmin: true,
+    });
+
+    const res = await request(app)
+      .patch("/api/environments/env-1")
+      .send({ driver: "local", config: { shell: "bash" }, envVars: {} });
+
+    expect(res.status).toBe(200);
+    expect(mockSecretService.normalizeEnvBindingsForPersistence).toHaveBeenCalledWith(
+      "company-1",
+      {},
+      expect.anything(),
+    );
+    expect(mockSecretService.syncEnvBindingsForTarget).toHaveBeenCalledWith(
+      "company-1",
+      { targetType: "environment", targetId: "env-1" },
+      expect.anything(),
+      { db: routeDbTx },
+    );
+  });
+
+  it("still refuses to guess a company for a config change when the instance has several", async () => {
+    // The resolved company owns any secret created from a raw-pasted value,
+    // so an ambiguous instance must keep failing rather than pick one.
+    const existing = { ...createEnvironment(), id: "env-1", config: { shell: "zsh" } };
+    mockEnvironmentService.getById.mockResolvedValue(existing);
+    mockSecretService.listBindingCompanyIdsForTarget.mockResolvedValue([]);
+    mockInstanceSettingsService.listCompanyIds.mockResolvedValue(["company-1", "company-2"]);
+    const app = createApp({
+      type: "board",
+      userId: "user-1",
+      source: "session",
+      companyIds: [],
+      isInstanceAdmin: true,
+    });
+
+    const res = await request(app)
+      .patch("/api/environments/env-1")
+      .send({ driver: "local", config: { shell: "bash" }, envVars: {} });
+
+    expect(res.status).toBe(422);
+    expect(res.body.error).toContain("requires a companyId context");
+    expect(mockEnvironmentService.update).not.toHaveBeenCalled();
+  });
+
   it("requires explicit SSH config when switching from local to SSH", async () => {
     mockEnvironmentService.getById.mockResolvedValue(createEnvironment());
     const app = createApp({
